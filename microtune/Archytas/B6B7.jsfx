@@ -153,6 +153,9 @@ while (midirecv(offset, m1, m2, m3)) (
   // Through complet
   through ? ( midisend(offset, m1, m2, m3); continue; );
 
+  // Laisser passer les contrôleurs (CC)
+  (st == 0xB0) ? ( midisend(offset, m1, m2, m3); continue; );
+
   // Pitch Bend entrant: convertir en cents et propager (additif avec PB microtonal de base)
   (st == 0xE0) ? (
     in_l = m2 & 0x7F; in_h = m3 & 0x7F;
@@ -233,4 +236,5 @@ while (midirecv(offset, m1, m2, m3)) (
   // Autres messages: ne rien émettre si Through=Off
   continue;
 );
+
 
