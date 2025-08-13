@@ -1,0 +1,51 @@
+desc:nyktoJS PB Tester (MIDI)
+in_pin:none
+out_pin:none
+
+slider1:cents=0<-200,200,1>Deviation (cents) [8192 = +200¢]
+slider2:through=0<0,1,1{Off,On}>Through (pass-through)
+slider3:send_all_on_change=1<0,1,1{Off,On}>Send PB to all channels on slider change
+
+@init
+// 14-bit pitch bend sender with the convention: 8192 = +200 cents (±2 semitones total)
+function compute_bend14(dev_cents) (
+  v = 8192 + 40.96 * dev_cents;
+  v < 0 ? v = 0 : v > 16383 ? v = 16383;
+  floor(v + 0.5);
+);
+
+function send_bend(ch, b14, ofs) (
+  lsb = b14 & 0x7F;
+  msb = (b14 >> 7) & 0x7F;
+  midisend(ofs, 0xE0 | ch, lsb, msb);
+);
+
+last_b14 = -1;
+
+@slider
+b14 = compute_bend14(cents);
+// Send on all channels if requested or value changed
+(send_all_on_change || (b14 != last_b14)) ? (
+  ch = 0; loop(16, send_bend(ch, b14, 0); ch += 1;);
+  last_b14 = b14;
+);
+
+@block
+through ? (
+  while (midirecv(ofs, a,b,c)) (
+    midisend(ofs, a,b,c);
+  );
+) : (
+  while (midirecv(ofs, m1,m2,m3)) (
+    st = m1 & 0xF0; ch = m1 & 0x0F;
+    (st == 0x90 && (m3 & 0x7F) > 0) ? (
+      // On Note On: send bend for this channel first, then the note
+      b14 = compute_bend14(cents);
+      send_bend(ch, b14, ofs);
+      midisend(ofs, m1,m2,m3);
+      continue;
+    );
+    // Forward everything else unchanged
+    midisend(ofs, m1,m2,m3);
+  );
+)

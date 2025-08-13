@@ -1,0 +1,68 @@
+desc:nyktoJS Archytas B6B7 Chromatic (MIDI)
+in_pin:none
+out_pin:none
+
+slider1:through=0<0,1,1{Off,On}>Through (pass-through)
+slider2:key=0<0,11,1{C,C#,D,D#,E,F,F#,G,G#,A,A#,B}>Tonalité (tonic)
+
+// Applique l'échelle chromatique B6B7 via Pitch Bend par note.
+// Convention PB: ±2 demi-tons => 8192 = +200 cents. bend14 = 8192 + 40.96 * Δcents.
+
+@init
+// Δcents par classe (ancrage ET: ET=100×classe, C..B)
+// [0, 131, 67, 135, 98, 117, 102, 82, 84, 33, 49, -28]
+b6b7_dev_cents[12];
+b6b7_dev_cents[0]=0;  b6b7_dev_cents[1]=131; b6b7_dev_cents[2]=67;  b6b7_dev_cents[3]=135;
+b6b7_dev_cents[4]=98; b6b7_dev_cents[5]=117; b6b7_dev_cents[6]=102; b6b7_dev_cents[7]=82;
+b6b7_dev_cents[8]=84; b6b7_dev_cents[9]=33;  b6b7_dev_cents[10]=49; b6b7_dev_cents[11]=-28;
+
+function bend14_from_dev(dev_cents) (
+  v = 8192 + 40.96 * dev_cents;
+  v < 0 ? v = 0 : v > 16383 ? v = 16383;
+  floor(v + 0.5);
+);
+
+function rotate_class(cls, key) (
+  // (cls - key) mod 12, version positive
+  (cls + (12 - (key & 0x0F))) % 12;
+);
+
+@block
+while (midirecv(offset, m1, m2, m3)) (
+  through ? (
+    midisend(offset, m1, m2, m3);
+    continue;
+  );
+
+  st = m1 & 0xF0;
+  ch = m1 & 0x0F;
+  note = m2 & 0x7F;
+  vel  = m3 & 0x7F;
+
+  // Bloquer PB entrant
+  (st == 0xE0) ? (
+    continue;
+  );
+
+  // Note Off explicite ou NoteOn vel=0 -> OFF sur le même canal
+  ((st == 0x80) || (st == 0x90 && vel == 0)) ? (
+    midisend(offset, (0x90 | ch), note, 0);
+    continue;
+  );
+
+  // Note On: appliquer PB puis réémettre la note sur le même canal
+  (st == 0x90) ? (
+    cls_in  = note % 12;
+    cls_map = rotate_class(cls_in, key);
+    dev     = b6b7_dev_cents[cls_map];
+    bend14  = bend14_from_dev(dev);
+    lsb = bend14 & 0x7F; msb = (bend14 >> 7) & 0x7F;
+
+    midisend(offset, (0xE0 | ch), lsb, msb);
+    midisend(offset, m1, m2, m3);
+    continue;
+  );
+
+  // Autres messages
+  midisend(offset, m1, m2, m3);
+);

@@ -1,55 +1,48 @@
-## Archytas
+## Archytas — Échelles linéaires B6/B7
 
 ### Principe
-Système basé sur des échelles linéaires (progressions arithmétiques) reproduites à l’octave et compatibles avec une écriture sur portée traditionnelle.
+Système basé sur des échelles linéaires (progressions arithmétiques) reproduites à l’octave et compatibles avec une écriture sur portée traditionnelle. Les intervalles sont construits à partir d’épimores (rapports superpartiels) issus de segments de série harmonique.
 
-### Gammes
-- B6: 6 notes par octave
-- B7: 7 notes par octave
+- B6: 6 degrés par octave (harmoniques 6→12)
+- B7: 7 degrés par octave (harmoniques 7→14)
 
-### Polyphonie et routage MIDI
-- 1 entrée MIDI → 16 sorties MIDI (canaux 1 à 16) pour la polyphonie.
-- Chaque note entrante est allouée à un canal voix; le Pitch Bend est envoyé par canal.
-- Sliders: « Premier canal de voix » et « Dernier canal de voix » pour définir la plage de canaux de sortie (p.ex. CH1–CH8).
+Réf. énoncé et contexte: Archytas – Échelles Linéaires
+- https://www.collectif-archytas.com/echelles-lineaires/
 
-### Résolution et conversion Pitch Bend
-- Résolution: 4096 unités = 1 demi‑ton.
-- Référence d’entrée: 14 bits, 0..16383 avec centre à 8192.
-- Convention Archytas: 8192 = centre, 16383 = +1 « ton » microtonal, 0 = −1 « ton » microtonal.
+### Règle de pitch bend (convention du projet)
+- Plage supposée côté instrument: ±2 demi‑tons
+- 8192 = +200 cents (2 demi‑tons)
+- 1 cent = 40,96 pas 14‑bit
+- Formule: bend14 = 8192 + 40,96 × Δcents (borné 0..16383)
+- Encodage: LSB = bend14 & 0x7F, MSB = (bend14 >> 7) & 0x7F
 
-Définitions par gamme:
-- B7: pas microtonal (en demi‑tons) \( s_{B7} = 12/7 \), soit en unités \( U_{B7} = 4096\times 12/7 \).
-- B6: pas microtonal (en demi‑tons) \( s_{B6} = 12/6 = 2 \), soit en unités \( U_{B6} = 4096\times 2 = 8192 \).
+Δcents est la déviation par rapport à l’ancrage ET standard: ET cible = 100 × classe (C=0, C#=100, …, B=1100). Exemple: 8/7 (≈231¢) pour C# (100¢) → Δcents = +131.
 
-Entrée Pitch Bend normalisée:
-- \( pb \in [0,16383] \), \( u = (pb - 8192)/8192 \in [-1,1] \).
-- Décalage en « tons » Archytas: \( d = u \) (±1 au maximum).
+### Chromatique juste (à partir de C5)
+| Degré | Ratio | Fréq (Hz) | Cents abs | ET cible (¢) | Δcents | bend14 | MSB | LSB |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| C | 1/1 | 523.251 | 0 | 0 | 0 | 8192 | 64 | 0 |
+| C# | 8/7 | 598.001 | 231 | 100 | +131 | 13558 | 105 | 118 |
+| D | 7/6 | 610.460 | 267 | 200 | +67 | 10936 | 85 | 56 |
+| D# | 9/7 | 672.751 | 435 | 300 | +135 | 13722 | 107 | 26 |
+| E | 4/3 | 697.668 | 498 | 400 | +98 | 12206 | 95 | 46 |
+| F | 10/7 | 747.502 | 617 | 500 | +117 | 12984 | 101 | 56 |
+| F# | 3/2 | 784.877 | 702 | 600 | +102 | 12370 | 96 | 82 |
+| G | 11/7 | 822.252 | 782 | 700 | +82 | 11551 | 90 | 31 |
+| G# | 5/3 | 872.085 | 884 | 800 | +84 | 11633 | 90 | 113 |
+| A | 12/7 | 897.002 | 933 | 900 | +33 | 9544 | 74 | 72 |
+| A# | 11/6 | 959.294 | 1049 | 1000 | +49 | 10199 | 79 | 87 |
+| B | 13/7 | 971.752 | 1072 | 1100 | −28 | 7045 | 55 | 5 |
 
-Conversion vers un offset de hauteur:
-- En demi‑tons: \( \Delta_{semi}(note) = \Delta_{base,semi}(note) + u\cdot s_{B\times} \)
-- En unités 4096: \( \Delta_{units}(note) = \Delta_{base,units}(note) + u\cdot U_{B\times} \)
+### Sliders
+- Through: bypass total du traitement (vérification A/B)
+- Tonalité (tonic): rotation des classes (C=0..B=11) pour appliquer Δcents sur la tonalité voulue (ancrage ET conservé)
 
-Envoi du Pitch Bend (14 bits) avec une plage d’instrument \( R \) (en demi‑tons):
-- \( bend14 = \mathrm{clamp}\big(8192 + (\Delta_{semi}/R)\cdot 8192,\ 0,\ 16383\big) \)
+### Utilisation
+- Insérer le plugin avant l’instrument.
+- Régler la plage de pitch bend de l’instrument à ±2 demi‑tons.
+- Vérifier au tuner: les fréquences doivent correspondre au tableau ci‑dessus.
 
-Où \( \Delta_{base} \) provient de la table de correspondance (réaccordage de la classe de note de l’entrée vers le degré de la gamme et son offset).
-
-### Contraintes liées au Pitch Bend et gestion des Note Off
-- Le Pitch Bend est défini par canal MIDI: une seule valeur possible à un instant donné sur un canal.
-- La polyphonie microtonale nécessite la répartition des notes sur plusieurs canaux (jusqu’à 16), chacun recevant son propre Pitch Bend.
-- Entrée traitée comme monophonique: à chaque nouvelle Note On, la note en cours est éteinte immédiatement (Note Off envoyée), et la Note Off d’origine correspondante sera filtrée lorsqu’elle arrivera pour éviter un double arrêt.
-
-### Table de correspondance B7 (par octave)
-Format: entrée mod( note_midi, 12 ) → ( sortie mod( note_midi, 12 ), valeur_pitchbend )
-
-- 0 → (0, 0)
-- (1, 2) → (2, 2539)
-- (3, 4) → (4, 2867)
-- (5, 6) → (6, 1475)
-- 7 → (7, 6717)
-- (8, 9) → (9, 2703)
-- (10, 11) → (10, 5898)
-
-Remarques:
-- Les paires d’entrée indiquent que les deux degrés partagent la même sortie et le même offset de Pitch Bend.
-- Les valeurs de Pitch Bend ci‑dessus sont données dans l’unité 4096 = 1 demi‑ton.
+### Notes
+- Le pitch bend est par canal: en mode simple, on envoie sur un canal fixe.
+- Pour une polyphonie microtonale multi‑canaux fiable, il faut une allocation par canal (MPE‑like) et une gestion stricte des Note Off; à réintroduire une fois la base validée.
