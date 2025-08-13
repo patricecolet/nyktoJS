@@ -4,9 +4,13 @@ out_pin:none
 
 slider1:through=0<0,1,1{Off,On}>Through (pass-through)
 slider2:key=0<0,11,1{C,C#,D,D#,E,F,F#,G,G#,A,A#,B}>Tonalité (tonic)
+slider3:out_first_ch=1<1,16,1>Premier canal de voix
+slider4:out_last_ch=8<1,16,1>Dernier canal de voix
+slider5:mono_ch=0<0,16,1{Off,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16}>Mono canal (debug)
+slider6:pb_debug=0<0,1,1{Off,On}>Debug PB (force +131c)
 
 // Applique l'échelle chromatique B6B7 via Pitch Bend par note.
-// Convention PB: ±2 demi-tons => 8192 = +200 cents. bend14 = 8192 + 40.96 * Δcents.
+// Convention PB: ±2 demi-tons, 8192 = centre, 1 cent = 40.96 pas.
 
 @init
 // Δcents par classe (ancrage ET: ET=100×classe, C..B)
@@ -22,47 +26,195 @@ function bend14_from_dev(dev_cents) (
   floor(v + 0.5);
 );
 
-function rotate_class(cls, key) (
-  // (cls - key) mod 12, version positive
-  (cls + (12 - (key & 0x0F))) % 12;
+function class_no_mod(nn) (
+  n = ((nn|0) % 12);
+  (n < 0) ? (n += 12;);
+  n;
+);
+
+// État polyphonique
+voice_active[16];
+voice_in_note[16];
+voice_out_note[16];
+last_bend14[16];
+
+// Piles par note (jusqu'à 8 voix simultanées par même note)
+note_count[128];
+note_channels[128*8];
+note_outnotes[128*8];
+// Variables globales de POP
+pop_ch = -1; pop_note = -1;
+
+// Plage de canaux (0..15)
+out_first = max(1,min(16,out_first_ch|0)) - 1;
+out_last  = max(1,min(16,out_last_ch|0)) - 1;
+(out_first > out_last) ? (out_first = 0; out_last = 15;);
+
+// Init états
+ch = 0; loop(16,
+  voice_active[ch] = 0;
+  voice_in_note[ch] = -1;
+  voice_out_note[ch] = -1;
+  last_bend14[ch] = 8192;
+  ch += 1;
+);
+i=0; loop(128, note_count[i] = 0; i += 1;);
+next_rr = out_first;
+
+function next_voice() (
+  ret = next_rr;
+  next_rr += 1;
+  (next_rr > out_last) ? ( next_rr = out_first; );
+  // Mode mono canal (debug)
+  m = (mono_ch|0);
+  (m >= 1 && m <= 16) ? ( ret = (m - 1); );
+  ret;
+);
+
+function stack_push(note_in, ch, out_note) (
+  // Borne le canal dans la plage courante par sécurité
+  (ch < out_first || ch > out_last) ? ( ch = out_first; );
+  base = (note_in & 0x7F) * 8;
+  cnt = note_count[note_in & 0x7F];
+  (cnt < 8) ? (
+    note_channels[base + cnt] = ch & 0x0F;
+    note_outnotes[base + cnt] = out_note & 0x7F;
+    note_count[note_in & 0x7F] = cnt + 1;
+  );
+);
+
+// Nouvelle version: écrit dans pop_ch / pop_note
+function stack_pop(note_in) (
+  base = (note_in & 0x7F) * 8;
+  cnt = note_count[note_in & 0x7F];
+  (cnt > 0) ? (
+    idx = cnt - 1;
+    pop_ch   = note_channels[base + idx];
+    pop_note = note_outnotes[base + idx];
+    note_count[note_in & 0x7F] = idx;
+  ) : (
+    pop_ch = -1; pop_note = -1;
+  );
+);
+
+function stack_remove_channel(note_in, ch) (
+  base = (note_in & 0x7F) * 8;
+  cnt = note_count[note_in & 0x7F];
+  i = 0; found = -1;
+  while (i < cnt && found < 0) (
+    (note_channels[base + i] == (ch & 0x0F)) ? (found = i;);
+    i += 1;
+  );
+  (found >= 0) ? (
+    last = cnt - 1;
+    note_channels[base + found] = note_channels[base + last];
+    note_outnotes[base + found] = note_outnotes[base + last];
+    note_count[note_in & 0x7F] = last;
+  );
+);
+
+// Recherche d’une voix active portant une note donnée
+function find_active_ch_for_note(nn) (
+  c = out_first; found = -1;
+  while (c <= out_last && found < 0) (
+    (voice_active[c] && voice_out_note[c] == (nn & 0x7F)) ? (found = c;);
+    c += 1;
+  );
+  found;
 );
 
 @block
-while (midirecv(offset, m1, m2, m3)) (
-  through ? (
-    midisend(offset, m1, m2, m3);
-    continue;
+// Recalcule la plage de canaux d'après les sliders et recadre next_rr
+new_first = max(1,min(16,out_first_ch|0)) - 1;
+new_last  = max(1,min(16,out_last_ch|0)) - 1;
+(new_first > new_last) ? ( new_first = 0; new_last = 15; );
+((new_first != out_first) || (new_last != out_last)) ? (
+  // Avant de changer de plage: All Notes Off et purge des piles
+  chx = out_first; while (chx <= out_last) (
+    (voice_active[chx] && voice_out_note[chx] >= 0) ? (
+      midisend(0, 0x90 | (chx & 0x0F), voice_out_note[chx] & 0x7F, 0);
+    );
+    voice_active[chx] = 0;
+    voice_in_note[chx] = -1;
+    voice_out_note[chx] = -1;
+    chx += 1;
   );
+  i=0; while (i < 128) (
+    note_count[i] = 0;
+    i += 1;
+  );
+  out_first = new_first; out_last = new_last;
+  (next_rr < out_first || next_rr > out_last) ? ( next_rr = out_first; );
+);
 
+while (midirecv(offset, m1, m2, m3)) (
   st = m1 & 0xF0;
-  ch = m1 & 0x0F;
+  in_ch = m1 & 0x0F;
   note = m2 & 0x7F;
   vel  = m3 & 0x7F;
 
+  // Through complet
+  through ? ( midisend(offset, m1, m2, m3); continue; );
+
   // Bloquer PB entrant
-  (st == 0xE0) ? (
-    continue;
-  );
+  (st == 0xE0) ? ( continue; );
 
-  // Note Off explicite ou NoteOn vel=0 -> OFF sur le même canal
+  // Note Off explicite ou NoteOn vel=0
   ((st == 0x80) || (st == 0x90 && vel == 0)) ? (
-    midisend(offset, (0x90 | ch), note, 0);
+    stack_pop(note);
+    valid_pop = (pop_ch >= out_first && pop_ch <= out_last) && (pop_note >= 0);
+    (valid_pop == 0) ? (
+      alt_ch = find_active_ch_for_note(note);
+      (alt_ch >= 0) ? ( pop_ch = alt_ch; pop_note = note & 0x7F; valid_pop = 1; );
+    );
+    valid_pop ? (
+      midisend(offset, (0x90 | (pop_ch & 0x0F)), pop_note & 0x7F, 0);
+      voice_active[pop_ch] = 0;
+      voice_in_note[pop_ch] = -1;
+      voice_out_note[pop_ch] = -1;
+    );
     continue;
   );
 
-  // Note On: appliquer PB puis réémettre la note sur le même canal
+  // Note On
   (st == 0x90) ? (
-    cls_in  = note % 12;
-    cls_map = rotate_class(cls_in, key);
-    dev     = b6b7_dev_cents[cls_map];
-    bend14  = bend14_from_dev(dev);
+    cls_in  = class_no_mod(note);
+    k = class_no_mod(key);
+    idx = (cls_in - k + 12) % 12;
+
+    vc = next_voice();
+
+    // PB selon tonalité (debug optionnel)
+    dev = (
+      idx == 0 ? 0 :
+      idx == 1 ? 131 :
+      idx == 2 ? 67 :
+      idx == 3 ? 135 :
+      idx == 4 ? 98 :
+      idx == 5 ? 117 :
+      idx == 6 ? 102 :
+      idx == 7 ? 82 :
+      idx == 8 ? 84 :
+      idx == 9 ? 33 :
+      idx == 10 ? 49 :
+      -28
+    );
+    pb_debug ? (dev = 131;);
+    bend14 = bend14_from_dev(dev);
     lsb = bend14 & 0x7F; msb = (bend14 >> 7) & 0x7F;
 
-    midisend(offset, (0xE0 | ch), lsb, msb);
-    midisend(offset, m1, m2, m3);
+    // PB puis Note au même offset
+    midisend(offset, (0xE0 | (vc & 0x0F)), lsb, msb);
+    midisend(offset, (0x90 | (vc & 0x0F)), note, vel);
+
+    // Mémoriser pour OFF
+    voice_active[vc] = 1;
+    voice_in_note[vc] = note & 0x7F;
+    voice_out_note[vc] = note & 0x7F;
+    stack_push(note, vc, note);
     continue;
   );
 
-  // Autres messages
-  midisend(offset, m1, m2, m3);
+  // Autres messages: ne rien émettre si Through=Off
+  continue;
 );
