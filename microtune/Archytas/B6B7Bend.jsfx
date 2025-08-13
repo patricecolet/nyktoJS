@@ -1,4 +1,4 @@
-desc:nyktoJS Archytas B6B7 Chromatic (MIDI)
+desc:nyktoJS Archytas B6B7 Bend (MIDI)
 in_pin:none
 out_pin:none
 
@@ -6,9 +6,11 @@ slider1:through=0<0,1,1{Off,On}>Through (pass-through)
 slider2:key=0<0,11,1{C,C#,D,D#,E,F,F#,G,G#,A,A#,B}>Tonalité (tonic)
 slider3:out_first_ch=1<1,16,1>Premier canal de voix
 slider4:out_last_ch=8<1,16,1>Dernier canal de voix
+slider5:pb_span=1<1,2,1>Étendue PB (demi-tons)
 
-// Applique l'échelle chromatique B6B7 via Pitch Bend par note.
-// Convention PB: ±2 demi-tons, 8192 = centre, 1 cent = 40.96 pas.
+// Archytas: PB mappé pour atteindre exactement le degré ±N à la butée, sans retrigger.
+// Convention: 8192 = centre, ±8192 = ±2 demi-tons (±200 cents). On interpole en cents entre
+// abs0 = 100*classe + Δcents(classe) et absN = 100*(classe±N) + Δcents(classe±N), avec t = |PB|/8192.
 
 @init
 // Δcents par classe (ancrage ET: ET=100×classe, C..B)
@@ -30,11 +32,14 @@ function class_no_mod(nn) (
   n;
 );
 
+function cls_map(c, tonic) (
+  ((c - tonic + 12) % 12);
+);
+
 // État polyphonique
 voice_active[16];
 voice_in_note[16];
 voice_out_note[16];
-last_bend14[16];
 
 // Piles par note (jusqu'à 8 voix simultanées par même note)
 note_count[128];
@@ -53,7 +58,6 @@ ch = 0; loop(16,
   voice_active[ch] = 0;
   voice_in_note[ch] = -1;
   voice_out_note[ch] = -1;
-  last_bend14[ch] = 8192;
   ch += 1;
 );
 i=0; loop(128, note_count[i] = 0; i += 1;);
@@ -67,7 +71,6 @@ function next_voice() (
 );
 
 function stack_push(note_in, ch, out_note) (
-  // Borne le canal dans la plage courante par sécurité
   (ch < out_first || ch > out_last) ? ( ch = out_first; );
   base = (note_in & 0x7F) * 8;
   cnt = note_count[note_in & 0x7F];
@@ -78,7 +81,6 @@ function stack_push(note_in, ch, out_note) (
   );
 );
 
-// Nouvelle version: écrit dans pop_ch / pop_note
 function stack_pop(note_in) (
   base = (note_in & 0x7F) * 8;
   cnt = note_count[note_in & 0x7F];
@@ -108,14 +110,27 @@ function stack_remove_channel(note_in, ch) (
   );
 );
 
-// Recherche d’une voix active portant une note donnée
-function find_active_ch_for_note(nn) (
-  c = out_first; found = -1;
-  while (c <= out_last && found < 0) (
-    (voice_active[c] && voice_out_note[c] == (nn & 0x7F)) ? (found = c;);
-    c += 1;
-  );
-  found;
+// Applique le PB mappé à une voix donnée
+function apply_pb_for_ch(ch_idx, bend_in14) (
+  cls = class_no_mod(voice_out_note[ch_idx]);
+  k = class_no_mod(key);
+  idx0 = cls_map(cls, k);
+  dev0 = b6b7_dev_cents[idx0|0];
+  abs0 = 100*cls + dev0;
+  // Normaliser la roue: f in [-1..1]
+  f = (bend_in14 - 8192) / 8192;
+  s = (f >= 0) ? 1 : -1;
+  mag = (f >= 0) ? f : -f;
+  span = (pb_span|0);
+  clsN = (cls + s*span + 120) % 12;
+  idxN = cls_map(clsN, k);
+  devN = b6b7_dev_cents[idxN|0];
+  absN = 100*clsN + devN;
+  absOut = abs0 + (absN - abs0) * mag;
+  devOut = absOut - 100*cls;
+  b14 = bend14_from_dev(devOut);
+  l = b14 & 0x7F; h = (b14 >> 7) & 0x7F;
+  midisend(offset, (0xE0 | (ch_idx & 0x0F)), l, h);
 );
 
 @block
@@ -124,7 +139,6 @@ new_first = max(1,min(16,out_first_ch|0)) - 1;
 new_last  = max(1,min(16,out_last_ch|0)) - 1;
 (new_first > new_last) ? ( new_first = 0; new_last = 15; );
 ((new_first != out_first) || (new_last != out_last)) ? (
-  // Avant de changer de plage: All Notes Off et purge des piles
   chx = out_first; while (chx <= out_last) (
     (voice_active[chx] && voice_out_note[chx] >= 0) ? (
       midisend(0, 0x90 | (chx & 0x0F), voice_out_note[chx] & 0x7F, 0);
@@ -142,29 +156,22 @@ new_last  = max(1,min(16,out_last_ch|0)) - 1;
   (next_rr < out_first || next_rr > out_last) ? ( next_rr = out_first; );
 );
 
-perf_pb_cents = 0; // déviation PB de performance en cents
+// Dernier PB entrant mémorisé
+last_in_bend14 = 8192;
 
 while (midirecv(offset, m1, m2, m3)) (
   st = m1 & 0xF0;
-  in_ch = m1 & 0x0F;
   note = m2 & 0x7F;
   vel  = m3 & 0x7F;
 
-  // Through complet
   through ? ( midisend(offset, m1, m2, m3); continue; );
 
-  // Pitch Bend entrant: convertir en cents et propager (additif avec PB microtonal de base)
+  // PB entrant: stocke et applique à toutes les voix actives
   (st == 0xE0) ? (
-    in_l = m2 & 0x7F; in_h = m3 & 0x7F;
-    bend_in = (in_h << 7) | in_l;
-    perf_pb_cents = (bend_in - 8192) / 40.96;
-    chp = out_first;
-    while (chp <= out_last) (
+    last_in_bend14 = ((m3 & 0x7F) << 7) | (m2 & 0x7F);
+    chp = out_first; while (chp <= out_last) (
       voice_active[chp] ? (
-        base_cents = (last_bend14[chp] - 8192) / 40.96;
-        comb_bend = bend14_from_dev(base_cents + perf_pb_cents);
-        l2 = comb_bend & 0x7F; h2 = (comb_bend >> 7) & 0x7F;
-        midisend(offset, (0xE0 | (chp & 0x0F)), l2, h2);
+        apply_pb_for_ch(chp, last_in_bend14);
       );
       chp += 1;
     );
@@ -176,8 +183,13 @@ while (midirecv(offset, m1, m2, m3)) (
     stack_pop(note);
     valid_pop = (pop_ch >= out_first && pop_ch <= out_last) && (pop_note >= 0);
     (valid_pop == 0) ? (
-      alt_ch = find_active_ch_for_note(note);
-      (alt_ch >= 0) ? ( pop_ch = alt_ch; pop_note = note & 0x7F; valid_pop = 1; );
+      // fallback: chercher la voix portant cette note
+      ch_scan = out_first; found = -1;
+      while (ch_scan <= out_last && found < 0) (
+        (voice_active[ch_scan] && voice_out_note[ch_scan] == (note & 0x7F)) ? (found = ch_scan;);
+        ch_scan += 1;
+      );
+      (found >= 0) ? (pop_ch = found; pop_note = note & 0x7F; valid_pop = 1;);
     );
     valid_pop ? (
       midisend(offset, (0x90 | (pop_ch & 0x0F)), pop_note & 0x7F, 0);
@@ -188,49 +200,19 @@ while (midirecv(offset, m1, m2, m3)) (
     continue;
   );
 
-  // Note On
+  // Note On: allocation, PB initial selon last_in_bend14, puis Note
   (st == 0x90) ? (
-    cls_in  = class_no_mod(note);
-    k = class_no_mod(key);
-    idx = (cls_in - k + 12) % 12;
-
     vc = next_voice();
-
-    // PB selon tonalité
-    dev = (
-      idx == 0 ? 0 :
-      idx == 1 ? 131 :
-      idx == 2 ? 67 :
-      idx == 3 ? 135 :
-      idx == 4 ? 98 :
-      idx == 5 ? 117 :
-      idx == 6 ? 102 :
-      idx == 7 ? 82 :
-      idx == 8 ? 84 :
-      idx == 9 ? 33 :
-      idx == 10 ? 49 :
-      -28
-    );
-    base_bend = bend14_from_dev(dev);
-    last_bend14[vc] = base_bend; // mémoriser PB microtonal de base pour la voix
-
-    // Ajouter PB de performance courant (en cents)
-    comb_bend2 = bend14_from_dev(dev + perf_pb_cents);
-    lsb2 = comb_bend2 & 0x7F; msb2 = (comb_bend2 >> 7) & 0x7F;
-
-    // PB combiné puis Note au même offset
-    midisend(offset, (0xE0 | (vc & 0x0F)), lsb2, msb2);
     midisend(offset, (0x90 | (vc & 0x0F)), note, vel);
-
-    // Mémoriser pour OFF
     voice_active[vc] = 1;
     voice_in_note[vc] = note & 0x7F;
     voice_out_note[vc] = note & 0x7F;
     stack_push(note, vc, note);
+    // Appliquer PB mappé actuel
+    apply_pb_for_ch(vc, last_in_bend14);
     continue;
   );
 
-  // Autres messages: ne rien émettre si Through=Off
+  // Autres messages ignorés si Through=Off
   continue;
 );
-
