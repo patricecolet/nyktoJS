@@ -61,6 +61,14 @@ next_rr = out_first;
 
 function next_voice() (
   ret = next_rr;
+  // Si le canal est occupé, arrêter l'ancienne note avant de la remplacer
+  voice_active[ret] ? (
+    midisend(0, (0x90 | (ret & 0x0F)), voice_out_note[ret] & 0x7F, 0);
+    stack_remove_channel(voice_in_note[ret], ret);
+    voice_active[ret] = 0;
+    voice_in_note[ret] = -1;
+    voice_out_note[ret] = -1;
+  );
   next_rr += 1;
   (next_rr > out_last) ? ( next_rr = out_first; );
   ret;
