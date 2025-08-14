@@ -59,12 +59,28 @@ ch = 0; loop(16,
 i=0; loop(128, note_count[i] = 0; i += 1;);
 next_rr = out_first;
 
+function stack_remove_channel(note_in, ch) (
+  base = (note_in & 0x7F) * 8;
+  cnt = note_count[note_in & 0x7F];
+  i = 0; found = -1;
+  while (i < cnt && found < 0) (
+    (note_channels[base + i] == (ch & 0x0F)) ? (found = i;);
+    i += 1;
+  );
+  (found >= 0) ? (
+    last = cnt - 1;
+    note_channels[base + found] = note_channels[base + last];
+    note_outnotes[base + found] = note_outnotes[base + last];
+    note_count[note_in & 0x7F] = last;
+  );
+);
+
 function next_voice() (
   ret = next_rr;
   // Si le canal est occupé, arrêter l'ancienne note avant de la remplacer
   voice_active[ret] ? (
     midisend(0, (0x90 | (ret & 0x0F)), voice_out_note[ret] & 0x7F, 0);
-    stack_remove_channel(voice_in_note[ret], ret);
+    (voice_in_note[ret] >= 0) ? ( stack_remove_channel(voice_in_note[ret], ret); );
     voice_active[ret] = 0;
     voice_in_note[ret] = -1;
     voice_out_note[ret] = -1;
@@ -97,22 +113,6 @@ function stack_pop(note_in) (
     note_count[note_in & 0x7F] = idx;
   ) : (
     pop_ch = -1; pop_note = -1;
-  );
-);
-
-function stack_remove_channel(note_in, ch) (
-  base = (note_in & 0x7F) * 8;
-  cnt = note_count[note_in & 0x7F];
-  i = 0; found = -1;
-  while (i < cnt && found < 0) (
-    (note_channels[base + i] == (ch & 0x0F)) ? (found = i;);
-    i += 1;
-  );
-  (found >= 0) ? (
-    last = cnt - 1;
-    note_channels[base + found] = note_channels[base + last];
-    note_outnotes[base + found] = note_outnotes[base + last];
-    note_count[note_in & 0x7F] = last;
   );
 );
 
@@ -244,5 +244,6 @@ while (midirecv(offset, m1, m2, m3)) (
   // Autres messages: ne rien émettre si Through=Off
   continue;
 );
+
 
 
